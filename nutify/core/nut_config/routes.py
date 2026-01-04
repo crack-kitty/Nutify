@@ -472,28 +472,139 @@ def restore_backup_files(backup_files, config_dir):
         except Exception as e:
             logger.error(f"Failed to restore backup for {filename}: {str(e)}")
 
+def handle_multi_ups_config(data, ups_devices_list, nut_mode, server_name, timezone):
+    """
+    Handle configuration for multiple UPS devices.
+
+    Args:
+        data: Request data
+        ups_devices_list: List of UPS device configurations
+        nut_mode: NUT mode (standalone, netserver, netclient)
+        server_name: Server name
+        timezone: Timezone
+
+    Returns:
+        JSON response
+    """
+    try:
+        logger.info(f"📦 Configuring {len(ups_devices_list)} UPS devices")
+
+        # Prepare global configuration variables
+        global_vars = {
+            'admin_username': data.get('admin_user', 'admin'),
+            'admin_password': data.get('admin_password', 'adminpass'),
+            'monitor_username': data.get('monitor_username', 'monuser'),
+            'monitor_password': data.get('monitor_password', 'monpass'),
+            'server_address': data.get('server_address', '127.0.0.1'),
+            'listen_address': data.get('listen_address', '0.0.0.0'),
+            'listen_port': data.get('listen_port', '3493'),
+        }
+
+        # Generate configuration files for multiple UPS
+        templates_dir = os.path.join(os.path.dirname(__file__), 'conf_templates')
+        conf_manager = NUTConfManager(templates_dir)
+        conf_files = conf_manager.get_multi_ups_conf_files(nut_mode, ups_devices_list, global_vars)
+
+        # Save configuration files to disk
+        config_dir = NUT_CONF_DIR
+        os.makedirs(config_dir, mode=0o755, exist_ok=True)
+
+        for filename, content in conf_files.items():
+            filepath = os.path.join(config_dir, filename)
+            with open(filepath, 'w') as f:
+                f.write(content)
+            logger.info(f"✅ Saved {filename}")
+
+        # Save UPS devices to database
+        from core.db.ups import db
+        from sqlalchemy import text
+
+        for idx, device in enumerate(ups_devices_list):
+            is_primary = device.get('is_primary', idx == 0)
+
+            db.session.execute(text("""
+                INSERT INTO ups_devices (
+                    name, friendly_name, driver, port, host, description,
+                    is_enabled, is_primary, connection_type,
+                    vendor_id, product_id, serial, order_index
+                ) VALUES (
+                    :name, :friendly_name, :driver, :port, :host, :description,
+                    1, :is_primary, :connection_type,
+                    :vendor_id, :product_id, :serial, :order_index
+                )
+            """), {
+                'name': device.get('name', f'ups{idx+1}'),
+                'friendly_name': device.get('friendly_name', device.get('name', f'ups{idx+1}')),
+                'driver': device.get('driver', 'usbhid-ups'),
+                'port': device.get('port', 'auto'),
+                'host': device.get('host', 'localhost'),
+                'description': device.get('description', ''),
+                'is_primary': is_primary,
+                'connection_type': device.get('connection_type', 'local_usb'),
+                'vendor_id': device.get('vendor_id'),
+                'product_id': device.get('product_id'),
+                'serial': device.get('serial'),
+                'order_index': idx
+            })
+
+        db.session.commit()
+        logger.info(f"✅ Saved {len(ups_devices_list)} UPS devices to database")
+
+        # Save initial setup configuration
+        from core.db.orm import InitialSetup
+        InitialSetup.create_or_update({
+            'server_name': server_name,
+            'timezone': timezone,
+            'is_configured': True,
+            'ups_realpower_nominal': data.get('ups_realpower_nominal')
+        })
+
+        logger.info("✅ Multi-UPS configuration saved successfully")
+
+        return jsonify({
+            'status': 'success',
+            'message': f'Successfully configured {len(ups_devices_list)} UPS device(s)',
+            'devices_count': len(ups_devices_list)
+        })
+
+    except Exception as e:
+        logger.error(f"❌ Error in multi-UPS configuration: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error saving multi-UPS configuration: {str(e)}'
+        }), 500
+
+
 @nut_config_bp.route('/api/setup/save-config', methods=['POST'])
 def save_config():
     """
     Save NUT configuration to disk and database.
-    
+
     This endpoint takes the configuration data from the wizard,
     generates the configuration files using templates,
     writes them to disk, and stores settings in the database.
-    
+
     Returns:
         JSON: Status and message.
     """
     try:
         data = request.get_json()
-        
+
         # Extract NUT mode and connection scenario from data
         nut_mode = data.get('nut_mode', 'standalone')
         connection_scenario = data.get('connection_scenario', 'local_usb')
-        
+
         # Extract setup data from session or request
         server_name = data.get('server_name', session.get(SETUP_DATA_KEY, {}).get('server_name', 'UPS'))
         timezone = data.get('timezone', session.get(SETUP_DATA_KEY, {}).get('timezone', 'UTC'))
+
+        # CHECK FOR MULTI-UPS CONFIGURATION
+        ups_devices_list = data.get('devices', [])
+
+        # If multi-UPS devices provided, use new multi-UPS flow
+        if ups_devices_list and len(ups_devices_list) > 0:
+            logger.info(f"🔄 Multi-UPS configuration detected: {len(ups_devices_list)} devices")
+            return handle_multi_ups_config(data, ups_devices_list, nut_mode, server_name, timezone)
         
         # Extract ups.realpower.nominal if provided
         ups_realpower_nominal = data.get('ups_realpower_nominal', None)

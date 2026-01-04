@@ -439,28 +439,33 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 // Add each device to the results
                 data.devices.forEach(device => {
-                    const deviceElement = document.createElement('div');
-                    deviceElement.className = 'scan-device';
-                    // Store the device object on the DOM element for later use
-                    deviceElement.__device = device;
-                    
-                    deviceElement.innerHTML = `
-                        <div class="scan-device-name">${device.name}</div>
-                        <div class="scan-device-details">
-                            Driver: ${device.driver || 'Unknown'}<br>
-                            Port: ${device.port || 'Unknown'}
-                        </div>
-                    `;
-                    
-                    // Add click event to select this device
-                    deviceElement.addEventListener('click', function() {
-                        // Remove selected class from all devices
-                        scanResults.querySelectorAll('.scan-device').forEach(el => {
-                            el.classList.remove('selected');
-                        });
-                        
-                        // Add selected class to this device
-                        this.classList.add('selected');
+                    // Use multi-select rendering if available
+                    let deviceElement;
+                    if (window.MultiUPSWizard && window.MultiUPSWizard.renderMultiSelectDevice) {
+                        deviceElement = window.MultiUPSWizard.renderMultiSelectDevice(device, mode, scanResults);
+                    } else {
+                        // Fallback to single-select (backward compatibility)
+                        deviceElement = document.createElement('div');
+                        deviceElement.className = 'scan-device';
+                        deviceElement.__device = device;
+
+                        deviceElement.innerHTML = `
+                            <div class="scan-device-name">${device.name}</div>
+                            <div class="scan-device-details">
+                                Driver: ${device.driver || 'Unknown'}<br>
+                                Port: ${device.port || 'Unknown'}
+                            </div>
+                        `;
+
+                        // Add click event to select this device (single-select)
+                        deviceElement.addEventListener('click', function() {
+                            // Remove selected class from all devices
+                            scanResults.querySelectorAll('.scan-device').forEach(el => {
+                                el.classList.remove('selected');
+                            });
+
+                            // Add selected class to this device
+                            this.classList.add('selected');
                         
                         // Update form fields with all available device information
                         if (device.driver) {
@@ -557,8 +562,9 @@ document.addEventListener('DOMContentLoaded', function() {
                             // No need to show further UI - auto-populate the form
                             showAlert('Automatically selected detected UPS device', 'success');
                         }
-                    });
-                    
+                        });
+                    }
+
                     scanResults.appendChild(deviceElement);
                 });
                 

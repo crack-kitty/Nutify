@@ -25,6 +25,7 @@ from .scheduler import scheduler
 from .db.initializer import init_database
 from core.report import report_manager, api_report, routes_report
 from core.options import api_options, routes_options
+from core.ups_management import ups_management_bp
 logger.info("🏁 Initializating init")
 
 def create_app(config=None):
@@ -102,5 +103,8 @@ def create_app(config=None):
     # Register options routes
     app.register_blueprint(api_options)
     app.register_blueprint(routes_options)
-    
+
+    # Register UPS management routes
+    app.register_blueprint(ups_management_bp)
+
     return app

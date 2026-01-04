@@ -1,6 +1,23 @@
 # Network UPS Tools: ups.conf
 # UPS definitions for NUT
 
+{% if UPS_DEVICES %}
+{% for ups in UPS_DEVICES %}
+[{{ups.name}}]
+    driver = "{{ups.driver}}"
+    port = "{{ups.port}}"
+    desc = "{{ups.description}}"
+    {% if ups.vendor_id %}vendorid = {{ups.vendor_id}}{% endif %}
+    {% if ups.product_id %}productid = {{ups.product_id}}{% endif %}
+    {% if ups.serial %}serial = "{{ups.serial}}"{% endif %}
+    pollinterval = 1
+    pollfreq = 1
+    user = nut
+    group = nut
+
+{% endfor %}
+{% else %}
+# Single UPS configuration (backward compatibility)
 [{{UPS_NAME}}]
     driver = "{{DRIVER}}"
     port = "{{PORT}}"
@@ -8,4 +25,5 @@
     pollinterval = 1
     pollfreq = 1
     user = nut
-    group = nut 
+    group = nut
+{% endif %}

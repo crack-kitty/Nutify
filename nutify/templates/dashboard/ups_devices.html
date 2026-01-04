@@ -1,0 +1,250 @@
+{% extends "dashboard/base.html" %}
+
+{% block content %}
+<div class="ups_devices_container">
+    <!-- Page Header -->
+    <div class="events_header">
+        <h2 class="events_title">UPS Devices Management</h2>
+        <div class="events_actions">
+            <button id="addDeviceBtn" class="options_btn options_btn_primary">
+                <i class="fas fa-plus"></i>
+                Add UPS Device
+            </button>
+            <button id="refreshDevicesBtn" class="options_btn options_btn_secondary">
+                <i class="fas fa-sync-alt"></i>
+                Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Quick Stats Grid -->
+    <div class="stats_grid">
+        <div class="stat_card">
+            <div class="stat-icon">
+                <i class="fas fa-plug"></i>
+            </div>
+            <div class="stat-content">
+                <div class="stat-header">
+                    <span class="stat-label">Total Devices</span>
+                </div>
+                <span id="totalDevices" class="stat-value">{{ devices|length }}</span>
+            </div>
+        </div>
+        <div class="stat_card">
+            <div class="stat-icon">
+                <i class="fas fa-check-circle"></i>
+            </div>
+            <div class="stat-content">
+                <div class="stat-header">
+                    <span class="stat-label">Enabled</span>
+                </div>
+                <span id="enabledDevices" class="stat-value">{{ devices|selectattr('is_enabled')|list|length }}</span>
+            </div>
+        </div>
+        <div class="stat_card">
+            <div class="stat-icon">
+                <i class="fas fa-star"></i>
+            </div>
+            <div class="stat-content">
+                <div class="stat-header">
+                    <span class="stat-label">Primary UPS</span>
+                </div>
+                <span id="primaryDevice" class="stat-value">
+                    {% set primary = devices|selectattr('is_primary')|first %}
+                    {{ primary.friendly_name if primary else 'None' }}
+                </span>
+            </div>
+        </div>
+        <div class="stat_card">
+            <div class="stat-icon">
+                <i class="fas fa-ban"></i>
+            </div>
+            <div class="stat-content">
+                <div class="stat-header">
+                    <span class="stat-label">Disabled</span>
+                </div>
+                <span id="disabledDevices" class="stat-value">{{ devices|rejectattr('is_enabled')|list|length }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- UPS Devices Grid -->
+    <div class="ups_devices_grid">
+        {% for device in devices %}
+        <div class="ups_device_card {% if not device.is_enabled %}disabled{% endif %}" data-device-id="{{ device.id }}">
+            <!-- Card Header -->
+            <div class="ups_device_header">
+                <div class="ups_device_title">
+                    <i class="fas fa-plug"></i>
+                    <span class="ups_device_name">{{ device.friendly_name or device.name }}</span>
+                    {% if device.is_primary %}
+                    <span class="ups_device_badge primary">
+                        <i class="fas fa-star"></i> Primary
+                    </span>
+                    {% endif %}
+                    {% if not device.is_enabled %}
+                    <span class="ups_device_badge disabled">
+                        <i class="fas fa-ban"></i> Disabled
+                    </span>
+                    {% endif %}
+                </div>
+                <div class="ups_device_actions_dropdown">
+                    <button class="ups_device_menu_btn">
+                        <i class="fas fa-ellipsis-v"></i>
+                    </button>
+                    <div class="ups_device_dropdown_menu">
+                        <a href="#" class="dropdown_item edit_device" data-device-id="{{ device.id }}">
+                            <i class="fas fa-edit"></i> Edit
+                        </a>
+                        <a href="#" class="dropdown_item test_connection" data-device-id="{{ device.id }}">
+                            <i class="fas fa-link"></i> Test Connection
+                        </a>
+                        <a href="#" class="dropdown_item toggle_device" data-device-id="{{ device.id }}">
+                            <i class="fas fa-{% if device.is_enabled %}ban{% else %}check{% endif %}"></i>
+                            {% if device.is_enabled %}Disable{% else %}Enable{% endif %}
+                        </a>
+                        <a href="#" class="dropdown_item delete_device" data-device-id="{{ device.id }}">
+                            <i class="fas fa-trash"></i> Delete
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card Body -->
+            <div class="ups_device_body">
+                <div class="ups_device_info_row">
+                    <span class="info_label">
+                        <i class="fas fa-tag"></i> UPS Name:
+                    </span>
+                    <span class="info_value">{{ device.name }}</span>
+                </div>
+                <div class="ups_device_info_row">
+                    <span class="info_label">
+                        <i class="fas fa-microchip"></i> Driver:
+                    </span>
+                    <span class="info_value">{{ device.driver }}</span>
+                </div>
+                <div class="ups_device_info_row">
+                    <span class="info_label">
+                        <i class="fas fa-plug-circle-bolt"></i> Port:
+                    </span>
+                    <span class="info_value">{{ device.port }}</span>
+                </div>
+                <div class="ups_device_info_row">
+                    <span class="info_label">
+                        <i class="fas fa-server"></i> Host:
+                    </span>
+                    <span class="info_value">{{ device.host }}</span>
+                </div>
+                {% if device.description %}
+                <div class="ups_device_info_row">
+                    <span class="info_label">
+                        <i class="fas fa-info-circle"></i> Description:
+                    </span>
+                    <span class="info_value">{{ device.description }}</span>
+                </div>
+                {% endif %}
+                {% if device.serial %}
+                <div class="ups_device_info_row">
+                    <span class="info_label">
+                        <i class="fas fa-barcode"></i> Serial:
+                    </span>
+                    <span class="info_value">{{ device.serial }}</span>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Card Footer -->
+            <div class="ups_device_footer">
+                <span class="device_status_indicator" id="status-{{ device.id }}">
+                    <i class="fas fa-circle"></i> Status: <span class="status_text">Unknown</span>
+                </span>
+            </div>
+        </div>
+        {% else %}
+        <div class="no_devices_message">
+            <i class="fas fa-plug-circle-xmark"></i>
+            <p>No UPS devices configured</p>
+            <button id="addFirstDeviceBtn" class="options_btn options_btn_primary">
+                <i class="fas fa-plus"></i>
+                Add Your First UPS Device
+            </button>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Add/Edit Device Modal -->
+<div id="deviceModal" class="modal">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="modalTitle">Add UPS Device</h3>
+            <button class="modal-close" id="closeDeviceModal">&times;</button>
+        </div>
+
+        <div class="modal-body">
+            <form id="deviceForm">
+                <input type="hidden" id="deviceId" value="">
+
+                <div class="form-group">
+                    <label for="deviceName">UPS Name (NUT identifier)*</label>
+                    <input type="text" id="deviceName" class="form-control" required placeholder="ups1">
+                    <small>Used in NUT commands. Must be unique.</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="deviceFriendlyName">Friendly Name</label>
+                    <input type="text" id="deviceFriendlyName" class="form-control" placeholder="Main Office UPS">
+                    <small>Display name in UI</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="deviceDriver">Driver*</label>
+                    <input type="text" id="deviceDriver" class="form-control" required placeholder="usbhid-ups">
+                    <small>NUT driver (e.g., usbhid-ups, snmp-ups)</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="devicePort">Port*</label>
+                    <input type="text" id="devicePort" class="form-control" required placeholder="auto">
+                    <small>Connection port (e.g., auto, /dev/ttyUSB0, 192.168.1.100)</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="deviceHost">Host</label>
+                    <input type="text" id="deviceHost" class="form-control" value="localhost">
+                    <small>Hostname or IP (usually localhost for local UPS)</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="deviceDescription">Description</label>
+                    <textarea id="deviceDescription" class="form-control" rows="2" placeholder="APC Back-UPS 1500VA"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="deviceIsPrimary">
+                        Set as primary UPS (receives critical alerts)
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="deviceIsEnabled" checked>
+                        Enable this device
+                    </label>
+                </div>
+            </form>
+        </div>
+
+        <div class="modal-footer">
+            <button type="button" id="saveDeviceBtn" class="btn btn-primary">Save Device</button>
+            <button type="button" id="cancelDeviceModal" class="btn btn-secondary">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/page_wrapper.js') }}"></script>
+<script src="{{ url_for('static', filename='js/ups_devices.js') }}"></script>
+{% endblock %}

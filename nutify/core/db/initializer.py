@@ -105,7 +105,19 @@ def init_database(app, db):
         logger.info("🏗️ Step 6: Creating remaining tables...")
         db.create_all()
         logger.info("✅ All tables created successfully")
-        
+
+        # Step 6.5: Run multi-UPS migration if needed
+        logger.info("🔄 Step 6.5: Checking for multi-UPS migration...")
+        from core.db.migrations import check_migration_needed, run_multi_ups_migration
+        if check_migration_needed(db):
+            logger.info("🚀 Running multi-UPS migration...")
+            if run_multi_ups_migration(db, app):
+                logger.info("✅ Multi-UPS migration completed successfully")
+            else:
+                logger.warning("⚠️ Multi-UPS migration encountered issues")
+        else:
+            logger.info("✅ Multi-UPS schema already up to date")
+
         # Step 7: Register models in UPS module to ensure they're available globally
         logger.info("🔗 Step 7: Registering models globally...")
         from core.db.ups import register_models_from_modelclasses

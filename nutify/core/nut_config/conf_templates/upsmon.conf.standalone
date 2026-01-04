@@ -1,8 +1,14 @@
 # Network UPS Tools: upsmon.conf
 # Configuration for upsmon client in standalone mode
 
-# Monitor the local UPS as master
+# Monitor UPS devices as master
+{% if UPS_DEVICES %}
+{% for ups in UPS_DEVICES %}
+MONITOR {{ups.name}}@{{ups.host}} 1 {{MONITOR_USERNAME}} {{MONITOR_PASSWORD}} master
+{% endfor %}
+{% else %}
 MONITOR {{UPS_NAME}}@{{UPS_HOST}} 1 {{MONITOR_USERNAME}} {{MONITOR_PASSWORD}} master
+{% endif %}
 
 # Basic configuration
 MINSUPPLIES 1
@@ -33,4 +39,4 @@ NOTIFYFLAG NOPARENT SYSLOG+WALL+EXEC
 
 # Add debug flags for more verbose logging
 DEBUG_MIN 2
-RUN_AS_USER nut 
+RUN_AS_USER nut

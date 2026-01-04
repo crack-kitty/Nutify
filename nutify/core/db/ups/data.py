@@ -12,7 +12,7 @@ from flask import current_app
 
 from core.logger import database_logger as logger
 from core.db.ups.errors import UPSDataError, UPSConnectionError
-from core.db.ups.utils import UPSData, ups_lock, ups_config, calculate_realpower
+from core.db.ups.utils import UPSData, ups_lock, ups_config, ups_config_manager, calculate_realpower
 from core.settings import UPSC_BIN
 
 def get_available_variables():
@@ -209,6 +209,165 @@ def get_ups_data():
             'error': error_msg
         })
         return data
+
+
+def get_all_ups_data():
+    """
+    Get current data from all enabled UPS devices.
+
+    This function polls all UPS devices configured in the database
+    and returns their current status and metrics.
+
+    Returns:
+        dict: Dictionary of {ups_id: UPSData} containing data from all enabled UPS
+    """
+    all_data = {}
+
+    try:
+        # Get all enabled UPS devices from the config manager
+        enabled_devices = ups_config_manager.get_all_enabled()
+
+        if not enabled_devices:
+            logger.warning("⚠️ No enabled UPS devices found")
+            return all_data
+
+        logger.debug(f"📊 Polling {len(enabled_devices)} UPS device(s)")
+
+        for ups_device in enabled_devices:
+            try:
+                # Check connection status for this specific UPS
+                from core.db.internal_checker import is_ups_connected
+
+                with ups_lock:
+                    # Construct the UPS target identifier
+                    ups_target = f"{ups_device.name}@{ups_device.host}"
+                    upsc_command = UPSC_BIN
+
+                    logger.debug(f"🔌 Polling UPS {ups_device.ups_id}: {ups_target}")
+
+                    try:
+                        # Run the command
+                        result = subprocess.run(
+                            [upsc_command, ups_target],
+                            capture_output=True,
+                            text=True,
+                            timeout=ups_device.timeout
+                        )
+
+                        # Check if command failed
+                        if result.returncode != 0:
+                            error_msg = f"UPS command failed for {ups_device.name}: {result.stderr.strip()}"
+                            logger.warning(error_msg)
+                            data = UPSData({
+                                'ups_id': ups_device.ups_id,
+                                'ups_name': ups_device.name,
+                                'friendly_name': ups_device.friendly_name,
+                                'ups_status': 'ERROR',
+                                'battery_charge': 0.0,
+                                'battery_runtime': 0,
+                                'input_voltage': 0.0,
+                                'output_voltage': 0.0,
+                                'error': error_msg
+                            })
+                            all_data[ups_device.ups_id] = data
+                            continue
+
+                        # Process the command output
+                        raw_data = {}
+                        for line in result.stdout.splitlines():
+                            if ':' in line:
+                                key, value = line.split(':', 1)
+                                raw_data[key.strip()] = value.strip()
+
+                        if not raw_data:
+                            logger.warning(f"No data returned for UPS {ups_device.name}")
+                            data = UPSData({
+                                'ups_id': ups_device.ups_id,
+                                'ups_name': ups_device.name,
+                                'friendly_name': ups_device.friendly_name,
+                                'ups_status': 'NO_DATA',
+                                'battery_charge': 0.0,
+                                'battery_runtime': 0,
+                                'input_voltage': 0.0,
+                                'output_voltage': 0.0,
+                                'error': 'No data returned from UPS'
+                            })
+                            all_data[ups_device.ups_id] = data
+                            continue
+
+                        # Calculate real power if needed
+                        raw_data = calculate_realpower(raw_data)
+
+                        # Transform NUT format keys to database format
+                        transformed_data = {}
+                        for key, value in raw_data.items():
+                            db_key = key.replace('.', '_')
+                            try:
+                                float_value = float(value)
+                                transformed_data[db_key] = float_value
+                            except ValueError:
+                                transformed_data[db_key] = value
+
+                        # Add UPS metadata
+                        transformed_data['ups_id'] = ups_device.ups_id
+                        transformed_data['ups_name'] = ups_device.name
+                        transformed_data['friendly_name'] = ups_device.friendly_name
+                        transformed_data['is_primary'] = ups_device.is_primary
+
+                        # Create and store the data object
+                        data = UPSData(transformed_data)
+                        all_data[ups_device.ups_id] = data
+
+                        logger.debug(
+                            f"✅ Retrieved data from UPS {ups_device.name}: "
+                            f"status={transformed_data.get('ups_status', 'UNKNOWN')}, "
+                            f"battery={transformed_data.get('battery_charge', 0)}%"
+                        )
+
+                    except subprocess.TimeoutExpired:
+                        error_msg = f"UPS command timed out for {ups_device.name}"
+                        logger.warning(error_msg)
+                        data = UPSData({
+                            'ups_id': ups_device.ups_id,
+                            'ups_name': ups_device.name,
+                            'friendly_name': ups_device.friendly_name,
+                            'ups_status': 'TIMEOUT',
+                            'battery_charge': 0.0,
+                            'battery_runtime': 0,
+                            'input_voltage': 0.0,
+                            'output_voltage': 0.0,
+                            'error': error_msg
+                        })
+                        all_data[ups_device.ups_id] = data
+
+                    except Exception as e:
+                        error_msg = f"Error polling UPS {ups_device.name}: {str(e)}"
+                        logger.error(error_msg)
+                        data = UPSData({
+                            'ups_id': ups_device.ups_id,
+                            'ups_name': ups_device.name,
+                            'friendly_name': ups_device.friendly_name,
+                            'ups_status': 'ERROR',
+                            'battery_charge': 0.0,
+                            'battery_runtime': 0,
+                            'input_voltage': 0.0,
+                            'output_voltage': 0.0,
+                            'error': error_msg
+                        })
+                        all_data[ups_device.ups_id] = data
+
+            except Exception as e:
+                error_msg = f"Error processing UPS {ups_device.ups_id}: {str(e)}"
+                logger.error(error_msg)
+                continue
+
+        logger.debug(f"📊 Successfully polled {len(all_data)}/{len(enabled_devices)} UPS devices")
+        return all_data
+
+    except Exception as e:
+        logger.error(f"❌ Error in get_all_ups_data: {str(e)}")
+        return all_data
+
 
 def get_historical_data(db, UPSData, start_time, end_time):
     """

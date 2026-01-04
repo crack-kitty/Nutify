@@ -15,7 +15,8 @@ import pytz
 from core.logger import database_logger as logger
 from core.db.ups import db
 from core.db.ups.utils import data_lock
-from core.db.ups.data import get_ups_data
+from core.db.ups.data import get_ups_data, get_all_ups_data
+from core.db.ups.aggregator import aggregate_ups_data
 from flask_socketio import SocketIO
 
 # Lock for cache operations
@@ -39,21 +40,32 @@ class UPSDataCache:
     def __init__(self, size=5):
         """
         Initialize the cache with Pandas
-        
+
         Args:
             size (int): Size of the buffer in seconds
         """
         self.size = size
-        self.data = []
+        self.data = []  # Legacy single-UPS buffer (for backward compatibility)
         self.df = None
+
+        # Multi-UPS data tracking
+        self.per_ups_data = {}  # {ups_id: [(timestamp, data_dict), ...]}
+        self.per_ups_df = {}    # {ups_id: DataFrame}
+        self.aggregated_data = []  # Buffer for aggregated data
+        self.aggregated_df = None
+
         self.next_save_time = None
         self.next_hour = None  #  For tracking the next hour
         self.hourly_data = []  # Buffer for hourly data
         self.last_daily_aggregation = None
+
         # Last broadcasted cache data
         self.last_broadcast = None
+        self.last_broadcast_aggregated = None  # Aggregated data
+        self.last_broadcast_per_ups = {}       # Per-UPS data
+
         cache_seconds = 60  # Fixed value
-        logger.info(f"📊 Initialized UPS data cache (size: {size} seconds, cache seconds: {cache_seconds})")
+        logger.info(f"📊 Initialized UPS data cache (size: {size} seconds, cache seconds: {cache_seconds}, multi-UPS support enabled)")
 
     def get_next_hour(self, current_time):
         """
@@ -283,6 +295,67 @@ class UPSDataCache:
         
         # Broadcast cache update to clients via WebSocket
         self.broadcast_cache_update(formatted_data)
+
+    def add_multi_ups(self, timestamp, all_ups_data):
+        """
+        Add data from multiple UPS devices to the buffer.
+
+        Args:
+            timestamp (datetime): Data timestamp
+            all_ups_data (dict): Dictionary of {ups_id: UPSData}
+        """
+        # If it's the first data point, initialize next_save_time
+        if self.next_save_time is None:
+            self.next_save_time = self.get_next_minute(timestamp)
+            logger.info(f"First multi-UPS data received. Next save scheduled for: {self.next_save_time}")
+
+        # Process each UPS device
+        for ups_id, ups_data in all_ups_data.items():
+            # Ensure keys are in the correct format
+            formatted_data = {}
+            data_dict = vars(ups_data) if hasattr(ups_data, '__dict__') else ups_data
+
+            for key, value in data_dict.items():
+                # Convert key from dot notation to underscore if needed
+                formatted_key = key.replace('.', '_')
+                formatted_data[formatted_key] = value
+
+            # Initialize buffer for this UPS if needed
+            if ups_id not in self.per_ups_data:
+                self.per_ups_data[ups_id] = []
+
+            # Add to the UPS-specific buffer
+            self.per_ups_data[ups_id].append((timestamp, formatted_data))
+
+            # Convert to DataFrame for this UPS
+            df_data = []
+            for ts, d in self.per_ups_data[ups_id]:
+                row = {'timestamp': ts, **d}
+                df_data.append(row)
+
+            self.per_ups_df[ups_id] = pd.DataFrame(df_data)
+
+        # Calculate and store aggregated data
+        aggregated = aggregate_ups_data(all_ups_data)
+
+        # Add aggregated data to buffer
+        self.aggregated_data.append((timestamp, aggregated))
+
+        # Convert aggregated buffer to DataFrame
+        agg_df_data = []
+        for ts, d in self.aggregated_data:
+            row = {'timestamp': ts, **d}
+            agg_df_data.append(row)
+
+        self.aggregated_df = pd.DataFrame(agg_df_data)
+
+        logger.debug(
+            f"📥 Added multi-UPS data: {len(all_ups_data)} UPS devices, "
+            f"aggregated buffer: {len(self.aggregated_data)}"
+        )
+
+        # Broadcast multi-UPS cache update
+        self.broadcast_multi_ups_update(aggregated, all_ups_data)
 
     def is_save_time(self, current_time):
         """
@@ -517,7 +590,7 @@ class UPSDataCache:
     def get_latest_cache_data(self):
         """
         Get the latest cache data for new WebSocket connections
-        
+
         Returns:
             dict: Latest cache data or empty dict if no data
         """
@@ -525,31 +598,124 @@ class UPSDataCache:
             return {}
         return self.last_broadcast
 
+    def broadcast_multi_ups_update(self, aggregated_data, per_ups_data):
+        """
+        Broadcast multi-UPS cache update to all connected WebSocket clients.
+
+        Args:
+            aggregated_data (dict): Aggregated metrics across all UPS
+            per_ups_data (dict): Dictionary of {ups_id: UPSData}
+        """
+        try:
+            if not aggregated_data:
+                return
+
+            # Create timestamp for broadcast
+            timestamp = datetime.now().isoformat()
+
+            # Prepare aggregated data for broadcast
+            broadcast_aggregated = {
+                'timestamp': timestamp,
+                **aggregated_data
+            }
+
+            # Prepare per-UPS data for broadcast
+            broadcast_per_ups = {}
+            for ups_id, ups_data in per_ups_data.items():
+                data_dict = vars(ups_data) if hasattr(ups_data, '__dict__') else ups_data
+                broadcast_per_ups[ups_id] = {
+                    'timestamp': timestamp,
+                    **data_dict
+                }
+
+            # Check for significant changes
+            should_broadcast = False
+
+            # Check aggregated status change
+            if (self.last_broadcast_aggregated is None or
+                broadcast_aggregated.get('ups_status') != self.last_broadcast_aggregated.get('ups_status')):
+                should_broadcast = True
+
+            # Check for significant numeric changes in aggregated data
+            if not should_broadcast and self.last_broadcast_aggregated:
+                important_metrics = ['ups_load', 'battery_charge', 'ups_realpower', 'input_voltage']
+                for metric in important_metrics:
+                    if metric in broadcast_aggregated and metric in self.last_broadcast_aggregated:
+                        try:
+                            current_val = float(broadcast_aggregated[metric] or 0)
+                            last_val = float(self.last_broadcast_aggregated[metric] or 0)
+                            if abs(current_val - last_val) >= 1.0:
+                                should_broadcast = True
+                                break
+                        except (ValueError, TypeError):
+                            should_broadcast = True
+                            break
+
+            # Skip broadcast if no meaningful changes
+            if not should_broadcast:
+                logger.debug("🔄 Skipping multi-UPS WebSocket broadcast - no significant changes")
+                return
+
+            # Update last broadcast
+            self.last_broadcast_aggregated = broadcast_aggregated.copy()
+            self.last_broadcast_per_ups = broadcast_per_ups.copy()
+
+            # Broadcast the multi-UPS data
+            multi_ups_broadcast = {
+                'aggregated': broadcast_aggregated,
+                'individual': broadcast_per_ups,
+                'ups_count': len(per_ups_data)
+            }
+
+            logger.debug(
+                f"📡 Broadcasting multi-UPS update: {len(per_ups_data)} devices, "
+                f"aggregated status={broadcast_aggregated.get('ups_status', 'UNKNOWN')}"
+            )
+            websocket.emit('multi_ups_update', multi_ups_broadcast)
+
+        except Exception as e:
+            logger.error(f"❌ Error broadcasting multi-UPS update: {str(e)}")
+
+    def get_latest_multi_ups_data(self):
+        """
+        Get the latest multi-UPS cache data for new WebSocket connections.
+
+        Returns:
+            dict: Latest multi-UPS data with aggregated and individual metrics
+        """
+        if not self.last_broadcast_aggregated:
+            return {}
+
+        return {
+            'aggregated': self.last_broadcast_aggregated,
+            'individual': self.last_broadcast_per_ups,
+            'ups_count': len(self.last_broadcast_per_ups)
+        }
+
 def save_ups_data(db, UPSDynamicData, ups_data_cache):
     """
-    Get the current UPS data and save it to the cache
-    
+    Get the current UPS data and save it to the cache.
+    Supports both single-UPS and multi-UPS modes.
+
     Args:
         db: Database instance
         UPSDynamicData: UPS dynamic data model class
         ups_data_cache: UPS data cache instance
-        
+
     Returns:
         tuple: (success, error_message)
     """
     try:
-        # Check connection status first using the connection monitor
-        from core.db.internal_checker import is_ups_connected
-        
-        if not is_ups_connected():
-            # If connection is not available, skip saving and return false
-            error_msg = "UPS connection unavailable, skipping data collection"
-            logger.warning(f"⚠️ {error_msg}")
-            return False, error_msg
-        
+        # Check for multi-UPS mode by checking if ups_devices table has entries
+        from core.db.ups.utils import ups_config_manager
+
+        # Try to load UPS devices from database
+        ups_config_manager.ensure_initialized()
+        enabled_devices = ups_config_manager.get_all_enabled()
+
         # Use UTC time directly for database operations
         now_utc = datetime.now(pytz.UTC)
-        
+
         # Get polling interval from VariableConfig
         try:
             if hasattr(db, 'ModelClasses') and hasattr(db.ModelClasses, 'VariableConfig'):
@@ -557,46 +723,75 @@ def save_ups_data(db, UPSDynamicData, ups_data_cache):
             else:
                 from core.db.ups import VariableConfig
                 model_class = VariableConfig
-            
+
             config = model_class.query.first()
             polling_interval = config.polling_interval if config else 1
         except Exception as e:
             logger.error(f"Error getting polling interval: {str(e)}. Using default of 1 second.")
             polling_interval = 1
-        
+
         # Adjust cache size based on polling interval
-        # For example, if cache seconds is 60 and polling_interval is 2,
-        # we should only need 30 samples in the buffer (60/2)
         if polling_interval > 1:
-            # Calculate the appropriate buffer size for the current polling interval
             cache_seconds = 60  # Fixed value
             target_buffer_size = max(5, int(cache_seconds / polling_interval))
             if ups_data_cache.size != target_buffer_size:
-                logger.info(f"Adjusting cache buffer size from {ups_data_cache.size} to {target_buffer_size} based on polling interval of {polling_interval} seconds")
+                logger.info(
+                    f"Adjusting cache buffer size from {ups_data_cache.size} to {target_buffer_size} "
+                    f"based on polling interval of {polling_interval} seconds"
+                )
                 ups_data_cache.size = target_buffer_size
-        
-        data = get_ups_data()
-        
-        # Convert DotDict to standard dictionary
-        data_dict = vars(data)
-        
-        # Log important values for debugging
-        ups_load = data_dict.get('ups_load', None)
-        ups_realpower = data_dict.get('ups_realpower', None)
-        ups_realpower_nominal = data_dict.get('ups_realpower_nominal', None)
 
-        
-        # Log the buffer
-        logger.debug(f"📥 Buffer status before add: {len(ups_data_cache.data)}")
-        ups_data_cache.add(now_utc, data_dict)
-        logger.debug(f"📥 Buffer status after add: {len(ups_data_cache.data)}")
-        
-        # Check if it's time to save
-        success = ups_data_cache.calculate_and_save_averages(db, UPSDynamicData, now_utc)
-        if success:
-            logger.info("💾 Successfully saved aligned data to database")
-                
-        return True, None
+        # Multi-UPS mode: multiple devices configured
+        if len(enabled_devices) > 1:
+            logger.debug(f"📊 Multi-UPS mode: polling {len(enabled_devices)} devices")
+
+            # Get data from all UPS devices
+            all_ups_data = get_all_ups_data()
+
+            if not all_ups_data:
+                error_msg = "No UPS data retrieved from any device"
+                logger.warning(f"⚠️ {error_msg}")
+                return False, error_msg
+
+            # Add multi-UPS data to cache
+            ups_data_cache.add_multi_ups(now_utc, all_ups_data)
+
+            # Check if it's time to save (using aggregated data)
+            # TODO: Implement multi-UPS save logic
+            logger.debug(f"📥 Multi-UPS buffer status: aggregated={len(ups_data_cache.aggregated_data)}")
+
+            return True, None
+
+        # Single-UPS mode: backward compatibility
+        else:
+            logger.debug("📊 Single-UPS mode (backward compatibility)")
+
+            # Check connection status first
+            from core.db.internal_checker import is_ups_connected
+
+            if not is_ups_connected():
+                error_msg = "UPS connection unavailable, skipping data collection"
+                logger.warning(f"⚠️ {error_msg}")
+                return False, error_msg
+
+            # Get data from single UPS
+            data = get_ups_data()
+
+            # Convert DotDict to standard dictionary
+            data_dict = vars(data)
+
+            # Log the buffer
+            logger.debug(f"📥 Buffer status before add: {len(ups_data_cache.data)}")
+            ups_data_cache.add(now_utc, data_dict)
+            logger.debug(f"📥 Buffer status after add: {len(ups_data_cache.data)}")
+
+            # Check if it's time to save
+            success = ups_data_cache.calculate_and_save_averages(db, UPSDynamicData, now_utc)
+            if success:
+                logger.info("💾 Successfully saved aligned data to database")
+
+            return True, None
+
     except Exception as e:
         error_msg = f"Error saving data: {str(e)}"
         logger.error(f"❌ {error_msg}")

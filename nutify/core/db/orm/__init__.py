@@ -3,6 +3,7 @@ ORM Models Package.
 This package contains individual ORM model definitions for each database table.
 """
 
+from core.db.orm.orm_ups_devices import UPSDevice, init_model as init_ups_device_model
 from core.db.orm.orm_ups_events import UPSEvent, init_model as init_ups_event_model
 from core.db.orm.orm_ups_opt_variable_config import VariableConfig, init_model as init_variable_config_model
 from core.db.orm.orm_ups_variables_upscmd import UPSCommand, init_model as init_ups_command_model
@@ -106,7 +107,13 @@ def init_models(db_instance, timezone_getter=None):
         Base,
         database_logger
     )
-    
+
+    # Initialize UPSDevice model (multi-UPS support)
+    _models['UPSDevice'] = init_ups_device_model(
+        Base,
+        database_logger
+    )
+
     # NUTConfig model has been removed as it's no longer used
     # Configuration is now managed through NUT configuration files
     
@@ -119,6 +126,7 @@ def init_models(db_instance, timezone_getter=None):
 # Export public symbols
 __all__ = [
     'init_models',
+    'UPSDevice',
     'UPSEvent',
     'VariableConfig',
     'UPSCommand',

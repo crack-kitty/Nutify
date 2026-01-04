@@ -10,6 +10,12 @@
 # Monitor user for upsmon with master privileges
 [{{MONITOR_USERNAME}}]
     password = "{{MONITOR_PASSWORD}}"
+    {% if UPS_DEVICES %}
+    {% for ups in UPS_DEVICES %}
+    upsmon {{ups.name}} = master
+    {% endfor %}
+    {% else %}
     upsmon {{UPS_NAME}} = master
+    {% endif %}
 
-{{ADDITIONAL_USERS}} 
+{{ADDITIONAL_USERS}}
